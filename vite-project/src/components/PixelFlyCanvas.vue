@@ -74,12 +74,26 @@ const props = defineProps({
     default: 'easeOutCubic',
     validator: (v) => ['linear', 'easeInQuad', 'easeOutQuad', 'easeInOutQuad', 'easeInCubic', 'easeOutCubic', 'easeInOutCubic', 'easeInQuart', 'easeOutQuart', 'easeInOutQuart', 'easeInBounce', 'easeOutBounce', 'easeInOutBounce', 'easeInElastic', 'easeOutElastic', 'easeInOutElastic'].includes(v),
   },
+  /**
+   * 按距离排序顺序：'asc' 正序（从近到远），'desc' 逆序（从远到近）
+   */
+  sortOrder: {
+    type: String,
+    default: 'asc',
+    validator: (v) => ['asc', 'desc'].includes(v),
+  },
 })
+
+const emit = defineEmits(['onStart', 'onProgress', 'onEnd'])
 
 const canvasRef = ref(null)
 let particles = []
 let animationFrameId = null
 let startTime = 0
+let hasStarted = false
+let hasEnded = false
+let lastProgressTime = 0
+let lastProgressValue = 0
 
 function clearAnimation() {
   if (animationFrameId !== null) {
@@ -292,8 +306,15 @@ function createParticlesFromImage(img, pixelSize) {
     }
   }
 
-  // 按距离排序（从最近到最远）
-  list.sort((a, b) => a.distance - b.distance)
+  // 按距离排序
+  const { sortOrder } = props
+  if (sortOrder === 'desc') {
+    // 逆序：从远到近
+    list.sort((a, b) => b.distance - a.distance)
+  } else {
+    // 正序：从近到远（默认）
+    list.sort((a, b) => a.distance - b.distance)
+  }
 
   // 为每个粒子设置延迟时间
   const { delayStart } = props
@@ -316,7 +337,11 @@ function createParticlesFromImage(img, pixelSize) {
 }
 
 function animate(timestamp) {
-  if (!startTime) startTime = timestamp
+  if (!startTime) {
+    startTime = timestamp
+    hasStarted = false
+    hasEnded = false
+  }
 
   const canvas = canvasRef.value
   if (!canvas) return
@@ -328,7 +353,35 @@ function animate(timestamp) {
   const totalDuration = duration + maxDelay
 
   // 检查是否所有动画都已完成
-  const overallProgress = elapsed / totalDuration
+  const overallProgress = Math.min(1, elapsed / totalDuration)
+
+  // 触发开始事件
+  if (!hasStarted && elapsed > 0) {
+    hasStarted = true
+    emit('onStart', {
+      totalParticles: particles.length,
+      totalDuration,
+      startTime: timestamp,
+    })
+  }
+
+  // 触发进度事件（每100ms或进度变化超过5%时触发）
+  if (hasStarted && !hasEnded) {
+    const progressPercent = overallProgress * 100
+    const timeSinceLastProgress = timestamp - lastProgressTime
+    const progressDelta = Math.abs(progressPercent - lastProgressValue)
+    
+    if (timeSinceLastProgress >= 100 || progressDelta >= 5) {
+      lastProgressTime = timestamp
+      lastProgressValue = progressPercent
+      emit('onProgress', {
+        progress: overallProgress,
+        elapsed,
+        totalDuration,
+        remaining: totalDuration - elapsed,
+      })
+    }
+  }
 
   // 获取选定的缓动函数
   const easingFunction = getEasingFunction(easingType)
@@ -371,6 +424,15 @@ function animate(timestamp) {
     animationFrameId = requestAnimationFrame(animate)
   } else {
     animationFrameId = null
+    // 触发结束事件
+    if (!hasEnded) {
+      hasEnded = true
+      emit('onEnd', {
+        totalParticles: particles.length,
+        totalDuration,
+        actualDuration: elapsed,
+      })
+    }
   }
 }
 
@@ -378,6 +440,10 @@ function loadAndGenerate() {
   clearAnimation()
   startTime = 0
   particles = []
+  hasStarted = false
+  hasEnded = false
+  lastProgressTime = 0
+  lastProgressValue = 0
 
   if (!props.image) return
 
@@ -401,12 +467,66 @@ function loadAndGenerate() {
   }
 }
 
+// 导出当前参数为 base64 编码的 JSON
+function exportParams() {
+  const params = {
+    image: props.image,
+    pixelSize: props.pixelSize,
+    duration: props.duration,
+    delayStart: props.delayStart,
+    startPoint: props.startPoint,
+    startOffsetX: props.startOffsetX,
+    startOffsetY: props.startOffsetY,
+    visibleBeforeStart: props.visibleBeforeStart,
+    easingType: props.easingType,
+    sortOrder: props.sortOrder,
+    trailEnabled: props.trailEnabled,
+    trailFade: props.trailFade,
+  }
+  const jsonString = JSON.stringify(params, null, 2)
+  const base64 = btoa(unescape(encodeURIComponent(jsonString)))
+  return base64
+}
+
+// 从 base64 编码的 JSON 导入参数
+function importParams(base64String) {
+  try {
+    const jsonString = decodeURIComponent(escape(atob(base64String)))
+    const params = JSON.parse(jsonString)
+    
+    // 验证并返回参数对象（由父组件更新 props）
+    return {
+      image: params.image || props.image,
+      pixelSize: params.pixelSize ?? props.pixelSize,
+      duration: params.duration ?? props.duration,
+      delayStart: params.delayStart ?? props.delayStart,
+      startPoint: params.startPoint || props.startPoint,
+      startOffsetX: params.startOffsetX ?? props.startOffsetX,
+      startOffsetY: params.startOffsetY ?? props.startOffsetY,
+      visibleBeforeStart: params.visibleBeforeStart ?? props.visibleBeforeStart,
+      easingType: params.easingType || props.easingType,
+      sortOrder: params.sortOrder || props.sortOrder,
+      trailEnabled: params.trailEnabled ?? props.trailEnabled,
+      trailFade: params.trailFade ?? props.trailFade,
+    }
+  } catch (error) {
+    console.error('导入参数失败:', error)
+    throw new Error('无效的 base64 参数格式')
+  }
+}
+
+// 暴露方法给父组件
+defineExpose({
+  exportParams,
+  importParams,
+})
+
 onMounted(() => {
   loadAndGenerate()
 })
 
 watch(
-  () => [props.image, props.pixelSize, props.delayStart, props.startPoint, props.startOffsetX, props.startOffsetY],
+  () => [props.image, props.pixelSize, props.delayStart, props.startPoint, props.startOffsetX, props.startOffsetY, props.sortOrder],
   () => {
     loadAndGenerate()
   }
